@@ -1,0 +1,29 @@
+[project]
+name = "r10k"
+version = "0.1.0"
+description = "A R10000 CPU simulator."
+readme = "README.md"
+requires-python = ">=3.14,<4"
+license = "GPL-3.0"
+dependencies = [
+]
+
+authors = [
+    { name = "k4lizen", email = "k4lizen@proton.me" }
+]
+
+[project.scripts]
+r10k = "r10k.entry:main"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["D101", "D102", "D107", "D103", "D203", "D212", "D203", "D212", "D100", "D104", "EM101", "TRY003", "EM102", "TD001", "TD002", "TD003", "FIX001", "PLR0913", "ERA001", "T201", "PLR2004", "S101"]
+
+[tool.setuptools]
+packages = ["r10k"]
+
+[tool.setuptools.package-data]
+r10k = ["py.typed"]
