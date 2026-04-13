@@ -7,9 +7,12 @@ def str_bool(b: bool) -> str:
     return "true" if b else "false"
 
 
+N_PHYSICAL_REGISTERS: int = 64
+
+
 class PhysicalRegisterFile:
     def __init__(self) -> None:
-        self.regs: list[int] = [0] * 64
+        self.regs: list[int] = [0] * N_PHYSICAL_REGISTERS
 
     def __str__(self) -> str:
         res: str = '    "PhysicalRegisterFile": [\n      '
@@ -23,22 +26,26 @@ class DecodedInstructionRegister:
         self.decoded_pcs: list[int] = []
 
     def __str__(self) -> str:
-        res: str = '    "DecodedInstructionRegister": [\n      '
+        res: str = '    "DecodedPCs": [\n      '
         res += ", ".join([str(x) for x in self.decoded_pcs])
         res += "\n    ],\n"
         return res
+
+
+N_LOGICAL_REGISTERS: int = 32
 
 
 class RegisterMapTable:
     def __init__(self) -> None:
         # self.logical_to_physical[4] means
         # "Which physical register is mapped to the logical register x4?"
-        self.logical_to_physical: list[int] = list(range(32))
+        self.logical_to_physical: list[int] = list(range(N_LOGICAL_REGISTERS))
 
     def __str__(self) -> str:
         res: str = '    "RegisterMapTable": [\n      '
         res += ", ".join([str(x) for x in self.logical_to_physical])
-        res += "\n    ],\n"
+        # no comma since it's the last structure
+        res += "\n    ]\n"
         return res
 
 
@@ -50,14 +57,14 @@ class FreeList:
         self.head: int = 0
         # tail is the last valid element
         self.tail: int = FREELIST_SIZE - 1
-        self.freelist: list[int] = list(range(FREELIST_SIZE))
+        self.freelist: list[int] = [x + 32 for x in range(FREELIST_SIZE)]
         # how many elements currently in the freelist?
         self.size = FREELIST_SIZE
 
     def has_x_to_give(self, x: int) -> bool:
         """Does the freelist contain >= x elements?"""
         return self.size >= x
-    
+
     def get_free_reg(self) -> int:
         assert self.head != -1, "Not enough registers for renaming, but you checked no?"
 
@@ -120,11 +127,12 @@ class ActiveListEntry:
         "Exception": {str_bool(self.exception)},
         "LogicalDestination": {self.logical_destination},
         "OldDestination": {self.old_destination},
-        "PC": {self.pc},
-      }},
-"""
+        "PC": {self.pc}
+      }}"""
+
 
 REORDER_BUFFER_SIZE: int = 32
+
 
 # The Reorder Buffer (ROB).
 class ActiveList:
@@ -148,7 +156,7 @@ class ActiveList:
             self.head = self.tail = 0
         else:
             assert self.head != (self.tail + 1) % REORDER_BUFFER_SIZE, (
-                f"No space for active list entry? But you checked, no?"
+                "No space for active list entry? But you checked, no?"
             )
             self.tail = (self.tail + 1) % FREELIST_SIZE
 
@@ -156,8 +164,7 @@ class ActiveList:
 
     def __str__(self) -> str:
         res: str = '    "ActiveList": [\n'
-        for el in self.the_list[self.head : self.tail]:
-            res += str(el)
+        res += ",\n".join([str(el) for el in self.the_list[self.head : self.tail]]) + "\n"
         res += "    ],\n"
         return res
 
@@ -186,10 +193,11 @@ class IntegerQueueEntry:
         "OpBValue": {self.opb_value},
         "OpCode": "{self.opcode}",
         "PC": {self.pc}
-      }},
-"""
+      }}"""
+
 
 INTEGER_QUEUE_SIZE = 32
+
 
 # The reservation station.
 class IntegerQueue:
@@ -213,7 +221,7 @@ class IntegerQueue:
             self.head = self.tail = 0
         else:
             assert self.head != (self.tail + 1) % INTEGER_QUEUE_SIZE, (
-                f"No space for integer queue entry? But you checked, no?"
+                "No space for integer queue entry? But you checked, no?"
             )
             self.tail = (self.tail + 1) % INTEGER_QUEUE_SIZE
 
@@ -221,10 +229,8 @@ class IntegerQueue:
 
     def __str__(self) -> str:
         res: str = '    "IntegerQueue": [\n'
-        for el in self.queue[self.head : self.tail]:
-            res += str(el)
-        # no comma since it's the last structure
-        res += "    ]\n"
+        res += ",\n".join([str(el) for el in self.queue[self.head : self.tail]]) + "\n"
+        res += "    ],\n"
 
         return res
 
@@ -246,17 +252,17 @@ class CPUState:
     def __str__(self) -> str:
         res = ""
         res += "  {\n"
+        res += str(self.active_list)
+        res += str(self.busy_bit_table)
+        res += str(self.decoded_instr_reg)
+        res += f'    "Exception": {str_bool(self.exception)},\n'
+        res += f'    "ExceptionPC": {self.exception_pc},\n'
+        res += str(self.freelist)
+        res += str(self.integer_queue)
         res += f'    "PC": {self.pc},\n'
         res += str(self.reg_file)
-        res += str(self.decoded_instr_reg)
-        res += f'    "ExceptionPC": {self.exception_pc},\n'
-        res += f'    "Exception": {str_bool(self.exception)},\n'
         res += str(self.reg_map_table)
-        res += str(self.freelist)
-        res += str(self.busy_bit_table)
-        res += str(self.active_list)
-        res += str(self.integer_queue)
-        res += "  },\n"
+        res += "  }"
         return res
 
 
@@ -281,6 +287,9 @@ class CPU:
         )
 
     def dump_state_into_log(self) -> None:
+        if self.state_log != "[\n":
+            self.state_log += ",\n"
+
         self.state_log += str(self.state)
 
     def is_active_empty(self) -> bool:
@@ -294,7 +303,7 @@ class CPU:
         pc_movement: int = min(4, len(self.input_instructions) - self.state.pc)
 
         # Ah but the DecodedInstructionRegister may not actually be ready since
-        # the stage2 may have applied backpreassure. 
+        # the stage2 may have applied backpreassure.
         dir_slots: int = 4 - len(newstate.decoded_instr_reg.decoded_pcs)
         pc_movement = min(pc_movement, dir_slots)
 
@@ -318,9 +327,10 @@ class CPU:
         # How many dest registers do we need?
         ninstr: int = len(self.state.decoded_instr_reg.decoded_pcs)
 
-        if not ( newstate.freelist.has_x_to_give(ninstr) and
-            newstate.active_list.has_x_free_slots(ninstr) and
-            newstate.integer_queue.has_x_free_slots(ninstr)
+        if not (
+            newstate.freelist.has_x_to_give(ninstr)
+            and newstate.active_list.has_x_free_slots(ninstr)
+            and newstate.integer_queue.has_x_free_slots(ninstr)
         ):
             # Not enough resources. We "apply backpreassure" simply by not clearing
             # the Decoded Instruction Register.
@@ -334,12 +344,12 @@ class CPU:
 
             # Kinda weird that we are "fetching" here but w/e
             instr = self.input_instructions[dec_pc].split(" ", 1)
-            opcode = instr[0].strip()
+            opcode = instr[0].strip().replace("addi", "add")
             operands: list[str] = instr[1].strip().split(",")
 
             # logical destination register
             destreg: int = int(operands[0].strip()[1:])
-                        
+
             # physical destination register
             # Update the freelist
             phys_destreg_num: int = newstate.freelist.get_free_reg()
@@ -382,33 +392,39 @@ class CPU:
                 # An immeditate
                 b_is_valid = True
                 b_value = int(opb_str)
+                opb_physreg = -1
 
             # FIXME: Also need to check the forwarding paths
 
-            # > Allocate newly renamed entries in the Active List and the Integer Queue. Integer Queue entries are
-            # > allocated after accessing the physical register file, which is similar to the Reservation Station used by
-            # > the Tomasulo algorithm but differs from what is presented in the R10000 paper.
+            # > Allocate newly renamed entries in the Active List and the Integer Queue. Integer
+            # > Queue entries are allocated after accessing the physical register file, which is
+            # > similar to the Reservation Station used by the Tomasulo algorithm but differs
+            # > from what is presented in the R10000 paper.
 
             rob_entry = ActiveListEntry(False, False, destreg, olddest, dec_pc)
             newstate.active_list.put_entry(rob_entry)
 
-            # FIXME: How do we calculate the tag again?
-            intque_entry = IntegerQueueEntry(phys_destreg_num, a_is_valid, -1, a_value, b_is_valid, -1, b_value, opcode, dec_pc)
+            intque_entry = IntegerQueueEntry(
+                phys_destreg_num,
+                a_is_valid,
+                opa_physreg, # tag
+                a_value,
+                b_is_valid,
+                opb_physreg, # tag
+                b_value,
+                opcode,
+                dec_pc,
+            )
             newstate.integer_queue.put_entry(intque_entry)
 
-            # > Observe the results of all functional units through the forwarding paths and update the physical
-            # > register file as well as the Busy Bit Table.
+            # > Observe the results of all functional units through the forwarding paths and
+            # > update the physical register file as well as the Busy Bit Table.
 
             # FIXME: Do this.
-
-
 
         # Clear the DIR to indicate no backpreassure.
         # NOTE: This means we must fetch (stage1) after this stage.
         newstate.decoded_instr_reg.decoded_pcs.clear()
-
-
-
 
     def stage3(self, newstate: CPUState) -> None:
         pass
