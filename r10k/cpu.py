@@ -197,6 +197,26 @@ class ActiveList:
 
         return entry
 
+    def pop_entry_backwards(self) -> ActiveListEntry | None:
+        """
+        Get entry from the back.
+
+        Returns None if empty.
+        """
+        if self.head == -1:
+            return None
+
+        self.size -= 1
+
+        if self.head == self.tail:
+            retval = self.the_list[self.head]
+            self.head = self.tail = -1
+            return retval
+
+        retval = self.the_list[self.tail]
+        self.tail = (self.tail - 1) % REORDER_BUFFER_SIZE
+        return retval
+
     def update_all(self, newstate: CPUState) -> None:
         if self.head == -1:
             # Empty
@@ -306,11 +326,13 @@ class IntegerQueue:
 
         return res
 
+
 @dataclass
 class ALUEntry:
     result: int
     exception: bool
     iqe: IntegerQueueEntry
+
 
 # 1. reset state, nothing
 # 2. DIR has fetched
@@ -320,6 +342,7 @@ class ALUEntry:
 # 6. integer queue empty, alu has 1 instr whose result it now exposes in the forwarding paths
 # 7. integer queue empy, alu empty, active list entry marked as done
 # 8. integer queue empy, alu empty, active list empty
+
 
 class ALU:
     """Represents 4 ALUs which work in two cycles."""
@@ -369,7 +392,6 @@ class ALU:
             if fw_entry.iqe.dest_register == physreg and fw_entry.exception:
                 return True
         return False
-
 
     def execute_one(self, entry: IntegerQueueEntry) -> ALUEntry:  # noqa: PLR0911
         """Returns the result of the operation, or None if it's an exception."""
@@ -465,8 +487,7 @@ class CPU:
 
         # > When the Commit stage indicates that an exception is detected,
         # > the PC is set to 0x10000.
-        if self.state.exception:
-            newstate.exception_pc = self.state.pc
+        if newstate.exception:
             newstate.pc = 0x10000
             return
 
@@ -489,6 +510,9 @@ class CPU:
 
     def stage2_rename(self, newstate: CPUState) -> None:
         # 3.2 Rename and Dispatch Stage
+
+        if newstate.exception:
+            return
 
         # > Observe the results of all functional units through the forwarding paths and
         # > update the physical register file as well as the Busy Bit Table.
@@ -606,8 +630,11 @@ class CPU:
         # This means we must fetch (stage1) after this stage.
         newstate.decoded_instr_reg.decoded_pcs.clear()
 
-    def stage3_issue(self, newstate: CPUState) -> None:
+    def stage3_issue(self, newstate: CPUState) -> None:  # noqa: C901
         # 3.3 Issue Stage(, Execution Stage, and Forwarding Paths)
+
+        if newstate.exception:
+            return
 
         # We can issue up to 4 ready instructions, ordered by PC
         # sort by PC first.
@@ -648,9 +675,11 @@ class CPU:
         for issuing in to_issue:
             newstate.integer_queue.queue.remove(issuing)
 
-
     def stage4_alu(self, newstate: CPUState) -> None:
         # 3.3 (Issue Stage), Execution Stage, and Forwarding Paths
+
+        if newstate.exception:
+            return
 
         # Move instructions from ALU input to middle station, simulation
         # a 1-cycle delay.
@@ -658,6 +687,9 @@ class CPU:
 
     def stage5_alu(self, newstate: CPUState) -> None:
         # 3.3 (Issue Stage), Execution Stage, and Forwarding Paths
+
+        if newstate.exception:
+            return
 
         # Clear out previous ALU instructions results
         # NOTE: We should have already used their results in all possible places.
@@ -670,9 +702,11 @@ class CPU:
         # Update the active list in the same cycle
         newstate.active_list.update_all(newstate)
 
-
     def stage6_commit(self, newstate: CPUState) -> None:
         # 3.4 Commit Stage
+
+        if newstate.exception:
+            return
 
         # > (1) marking instructions done or exception on
         # > receiving results from forwarding paths,
@@ -690,26 +724,56 @@ class CPU:
                 break
 
             to_commit.append(entry)
-            newstate.active_list.pop_entry()
 
             if entry.exception:
-                # If we are going to commit an exception, stop here
+                # If we are going to commit an exception, stop here.
+                # We don't pop this here, let it be popped at the end of rollback.
                 break
 
+            newstate.active_list.pop_entry()
 
-        # FIXME: handle exceptions!
-        # FIXME: what?
         # > (2) retiring or rolling back instructions
-
         # > (3) recycling physical registers and push them back to the Free List.
         for commiting in to_commit:
+            if commiting.exception:
+                # > Record the PC of the instruction with the exception in the
+                # > Exception PC register and set the Exception Flag register.
+                newstate.exception = True
+                newstate.exception_pc = commiting.pc
+                newstate.pc = 0x10000
+                break
+
             newstate.freelist.give_back_reg(commiting.old_destination)
 
-    def stage6(self, newstate: CPUState) -> None:
-        pass
+        if newstate.exception:
+            # > Notify the Fetch and Decode stage that no instruction should be decoded and
+            # > supplied during the Exception Mode. The Fetch and Decode stage should set
+            # > the PC to 0x10000 and clear the Decoded Instruction Register on the same cycle.
+            newstate.decoded_instr_reg.decoded_pcs.clear()
 
-    def stage7(self, newstate: CPUState) -> None:
-        pass
+            # > Reset the Integer Queue and the Execution stage.
+            newstate.integer_queue = IntegerQueue()
+            newstate.alu = ALU()
+
+    def exception_rollback_stage(self, newstate: CPUState) -> None:
+        # > Similar to MIPS R10000, in every cycle, pick (up to) 4 instructions in reverse
+        # > program order from the Active list bottom, and use it to recover the Register
+        # > Map Table, the Free List, and the Busy Bit Table.
+        amount = 0
+        while amount < 4:
+            entry: ActiveListEntry | None = newstate.active_list.pop_entry_backwards()
+            if entry is None:
+                # Active List is empty
+                break
+
+            # I'm a bit confused on why but okay.
+            newstate.freelist.give_back_reg(entry.physical_destination)
+            newstate.busy_bit_table.is_busy[entry.physical_destination] = False
+            newstate.reg_map_table.logical_to_physical[entry.logical_destination] = (
+                entry.old_destination
+            )
+
+            amount += 1
 
     def propagate(self) -> CPUState:
         # self.state is oldstate, not modified during propagation
@@ -734,8 +798,9 @@ class CPU:
 
         self.stage1_fetch(newstate)
 
-        # self.stage6(newstate)
-        # self.stage6(newstate)
+        if self.state.exception:
+            # We don't use `newstate` because we don't rollback on the same cycle.
+            self.exception_rollback_stage(newstate)
 
         return newstate
 
@@ -762,6 +827,11 @@ class CPU:
             # Lock in new state.
             self.latch(newstate)
 
+            self.dump_state_into_log()
+
+        if self.state.exception:
+            # One more final state where the flag is cleared
+            self.state.exception = False
             self.dump_state_into_log()
 
         self.save_log()
