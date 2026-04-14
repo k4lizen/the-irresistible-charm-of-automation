@@ -380,7 +380,7 @@ class ALU:
             case "add":
                 return ALUEntry(entry.opa_value + entry.opb_value, False, entry)
             case "sub":
-                return ALUEntry(entry.opa_value + entry.opb_value, False, entry)
+                return ALUEntry(entry.opa_value - entry.opb_value, False, entry)
             case "mulu":
                 return ALUEntry(entry.opa_value * entry.opb_value, False, entry)
             case "divu":
