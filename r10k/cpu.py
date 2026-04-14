@@ -1,6 +1,7 @@
 import copy
 from dataclasses import dataclass
 from pathlib import Path
+import os
 
 
 def str_bool(b: bool) -> str:
@@ -477,6 +478,7 @@ class CPU:
             self.state_log += ",\n"
 
         self.state_log += str(self.state)
+        self.cycle += 1
 
     def is_active_empty(self) -> bool:
         # return True
@@ -610,7 +612,7 @@ class CPU:
             # > from what is presented in the R10000 paper.
 
             rob_entry = ActiveListEntry(False, False, destreg, olddest, dec_pc, phys_destreg_num)
-            print("active list put", rob_entry)
+            # print("active list put", rob_entry)
             newstate.active_list.put_entry(rob_entry)
 
             intque_entry = IntegerQueueEntry(
@@ -630,7 +632,7 @@ class CPU:
         # This means we must fetch (stage1) after this stage.
         newstate.decoded_instr_reg.decoded_pcs.clear()
 
-    def stage3_issue(self, newstate: CPUState) -> None:  # noqa: C901
+    def stage3_issue(self, newstate: CPUState) -> None:  # noqa: C901, PLR0912
         # 3.3 Issue Stage(, Execution Stage, and Forwarding Paths)
 
         if newstate.exception:
@@ -649,6 +651,11 @@ class CPU:
                     # We found the value of the operand in the ALU forwarding path
                     entry.opa_is_ready = True
                     entry.opa_value = forwarded_res
+                else:  # noqa: PLR5501
+                    # Check the busy bit table & register file
+                    if not newstate.busy_bit_table.is_busy[entry.opa_reg_tag]:
+                        entry.opa_is_ready = True
+                        entry.opa_value = newstate.reg_file.regs[entry.opa_reg_tag]
 
             # Check ALU forwarding path for operand B if it is not ready
             if not entry.opb_is_ready:
@@ -657,14 +664,17 @@ class CPU:
                     # We found the value of the operand in the ALU forwarding path
                     entry.opb_is_ready = True
                     entry.opb_value = forwarded_res
+                else:  # noqa: PLR5501
+                    # Check the busy bit table & register file
+                    if not newstate.busy_bit_table.is_busy[entry.opb_reg_tag]:
+                        entry.opb_is_ready = True
+                        entry.opb_value = newstate.reg_file.regs[entry.opa_reg_tag]
 
             # If both operands are ready, we can issue
-            if entry.opa_is_ready and entry.opb_is_ready:
+            # We continue setting fields even if we can't issue any more
+            if entry.opa_is_ready and entry.opb_is_ready and len(to_issue) < 4:
                 to_issue.append(entry)
 
-            # Terminate if we have reached the limit
-            if len(to_issue) >= 4:
-                break
 
         # Add to first stage of ALU
         for issuing in to_issue:
@@ -818,6 +828,8 @@ class CPU:
         return self.state.pc >= len(self.input_instructions)
 
     def run_completely(self) -> None:
+        self.cycle = 0
+
         self.dump_state_into_log()
 
         while not (self.no_instr_left() and self.is_active_empty()):
@@ -828,6 +840,8 @@ class CPU:
             self.latch(newstate)
 
             self.dump_state_into_log()
+            # self.save_log()
+            # os.system("sleep 1")
 
         if self.state.exception:
             # One more final state where the flag is cleared
