@@ -120,6 +120,9 @@ class ActiveListEntry:
     old_destination: int
     pc: int
 
+    # Internal (tag), weird
+    physical_destination: int
+
     def __str__(self) -> str:
         return f"""\
       {{
@@ -140,7 +143,7 @@ class ActiveList:
         self.head: int = -1
         self.tail: int = -1
         self.the_list: list[ActiveListEntry] = [
-            ActiveListEntry(False, False, 0, 0, 0) for _ in range(REORDER_BUFFER_SIZE)
+            ActiveListEntry(False, False, 0, 0, 0, 0) for _ in range(REORDER_BUFFER_SIZE)
         ]
         self.size = 0
 
@@ -181,11 +184,50 @@ class ActiveList:
 
         return entry
 
+    def update_all(self, newstate: CPUState) -> None:
+        if self.head == -1:
+            # Empty
+            return
+
+        i: int = self.head
+        while True:
+            entry = self.the_list[i]
+
+            if entry.done:
+                continue
+
+            # We don't need to check the busybit table, since the table is updated
+            # based on the ALU anyway.
+
+            fw_path_excepted: bool = newstate.alu.fw_path_exception(entry.physical_destination)
+            if fw_path_excepted:
+                entry.done = True
+                entry.exception = True
+            else:
+                fw_result: int | None = newstate.alu.fw_path(entry.physical_destination)
+                if fw_result is not None:
+                    entry.done = True
+                    entry.exception = False
+
+            i = (i + 1) % REORDER_BUFFER_SIZE
+            if i == self.tail + 1:
+                break
 
     def __str__(self) -> str:
         res: str = '    "ActiveList": [\n'
-        res += ",\n".join([str(el) for el in self.the_list[self.head : self.tail]]) + "\n"
-        res += "    ],\n"
+        if self.head != -1:
+            i: int = self.head
+            while True:
+                if i != 0:
+                    res += ",\n"
+
+                res += str(self.the_list[i])
+
+                i = (i + 1) % REORDER_BUFFER_SIZE
+                if i == self.tail + 1:
+                    break
+
+        res += "\n    ],\n"
         return res
 
 
@@ -251,44 +293,75 @@ class IntegerQueue:
 
         return res
 
+@dataclass
+class ALUEntry:
+    result: int
+    exception: bool
+    iqe: IntegerQueueEntry
 
 class ALU:
     """Represents 4 ALUs which work in two cycles."""
 
     def __init__(self) -> None:
         self.first_half: list[IntegerQueueEntry] = []
-        self.second_half: list[IntegerQueueEntry] = []
+        self.second_half: list[ALUEntry] = []
 
     def clear_second(self) -> None:
         self.second_half.clear()
 
-    def first_to_second(self) -> None:
-        self.second_half.extend(self.first_half)
+    def execute(self) -> None:
+        """
+        Move the first half entry's into the second half by executing them.
+
+        Assumes the second half is already empty.
+        Will not clear the first half.
+        """
+        for iqe in self.first_half:
+            self.second_half.append(self.execute_one(iqe))
 
     def clear_first(self) -> None:
         self.first_half.clear()
 
-    def execute(self, entry: IntegerQueueEntry) -> int | None:
+    def fw_path(self, physreg: int) -> int | None:
+        """
+        Returns the value of the physical register physreg if it is available
+        on the forwarding path (second half-ALU), otherwise returns None.
+        """  # noqa: D205
+        for fw_entry in self.second_half:
+            if fw_entry.iqe.dest_register == physreg and not fw_entry.exception:
+                return fw_entry.result
+
+        return None
+
+    def fw_path_exception(self, physreg: int) -> bool:
+        for fw_entry in self.second_half:
+            if fw_entry.iqe.dest_register == physreg and fw_entry.exception:
+                return True
+        return False
+
+
+    def execute_one(self, entry: IntegerQueueEntry) -> ALUEntry:  # noqa: PLR0911
         """Returns the result of the operation, or None if it's an exception."""
-        assert entry.opa_is_ready and entry.opb_is_ready
+        assert entry.opa_is_ready
+        assert entry.opb_is_ready
 
         match entry.opcode:
             case "add":
-                return entry.opa_value + entry.opb_value
+                return ALUEntry(entry.opa_value + entry.opb_value, False, entry)
             case "sub":
-                return entry.opa_value + entry.opb_value
+                return ALUEntry(entry.opa_value + entry.opb_value, False, entry)
             case "mulu":
-                return entry.opa_value * entry.opb_value
+                return ALUEntry(entry.opa_value * entry.opb_value, False, entry)
             case "divu":
                 if entry.opb_value == 0:
-                    return None
-                return entry.opa_value // entry.opb_value
+                    return ALUEntry(-1, True, entry)
+                return ALUEntry(entry.opa_value // entry.opb_value, False, entry)
             case "remu":
                 if entry.opb_value == 0:
-                    return None
-                return entry.opa_value % entry.opb_value
+                    return ALUEntry(-1, True, entry)
+                return ALUEntry(entry.opa_value % entry.opb_value, False, entry)
             case _:
-                assert "Invalid opcode in execute."
+                assert False, "Invalid opcode in execute."
 
 
 @dataclass
@@ -355,17 +428,25 @@ class CPU:
     def is_active_empty(self) -> bool:
         return True
 
-    def stage1(self, newstate: CPUState) -> None:
+    def stage1_fetch(self, newstate: CPUState) -> None:
         # 3.1 Fetch and Decode Stage
-        # FIXME: backpreassure stuff
+
+        # > When the Commit stage indicates that an exception is detected,
+        # > the PC is set to 0x10000.
+        if self.state.exception:
+            newstate.exception_pc = self.state.pc
+            newstate.pc = 0x10000
+            return
+
+        # > If the Rename and Dispatch stage applies backpressure, no instructions are processed.
+        # The DecodedInstructionRegister may not actually be ready since
+        # the stage2 may have applied backpreassure.
+        # NOTE: non-obvious if i should completely give up in this case, or fill as much as possible
+        if len(newstate.decoded_instr_reg.decoded_pcs) > 0:
+            return
 
         # Calculate new PC value
         pc_movement: int = min(4, len(self.input_instructions) - self.state.pc)
-
-        # Ah but the DecodedInstructionRegister may not actually be ready since
-        # the stage2 may have applied backpreassure.
-        dir_slots: int = 4 - len(newstate.decoded_instr_reg.decoded_pcs)
-        pc_movement = min(pc_movement, dir_slots)
 
         # Now move the PC
         newstate.pc = self.state.pc + pc_movement
@@ -374,8 +455,17 @@ class CPU:
         for i in range(self.state.pc, newstate.pc):
             newstate.decoded_instr_reg.decoded_pcs.append(i)
 
-    def stage2(self, newstate: CPUState) -> None:
+    def stage2_rename(self, newstate: CPUState) -> None:
         # 3.2 Rename and Dispatch Stage
+
+        # > Observe the results of all functional units through the forwarding paths and
+        # > update the physical register file as well as the Busy Bit Table.
+        # Even though this is listed last, we're gonna do it first, regardless of backpressure.
+        for i in range(N_PHYSICAL_REGISTERS):
+            fw_res: int | None = newstate.alu.fw_path(i)
+            if fw_res is not None:
+                newstate.reg_file.regs[i] = fw_res
+                newstate.busy_bit_table.is_busy[i] = False
 
         # > Check if there are enough physical registers, enough entries in the Active List, and
         # > enough entries in the Integer Queue. If not, apply back pressure to the previous stage,
@@ -418,6 +508,9 @@ class CPU:
             olddest: int = newstate.reg_map_table.logical_to_physical[destreg]
             newstate.reg_map_table.logical_to_physical[destreg] = phys_destreg_num
 
+            # Update the Busy Bit Table
+            newstate.busy_bit_table.is_busy[phys_destreg_num] = True
+
             # > Determine the state of the operands required by each instruction. Each operand
             # > can be either (a) ready in the physical register file, (b) ready from the
             # > forwarding path, or (c) not produced yet. Similar to MIPS R10000, a Busy
@@ -426,26 +519,27 @@ class CPU:
             opa_reg: int = int(operands[1].strip()[1:])
             opb_str: str = operands[2].strip()
 
-            # FIXME: Am I sure that I'm supposed to be looking at the old state of the
-            # busy bit table?
-            # FIXME: Also looking at the old state of the mapping table right after updating it?
-            # oof.
+            # NOTE: Looking at the old state of the mapping table right after updating it?
+            # Is this correct?
 
             opa_physreg: int = self.state.reg_map_table.logical_to_physical[opa_reg]
-            a_is_valid: bool = not self.state.busy_bit_table.is_busy[opa_physreg]
+            # Looking at `newstate` here cuz we just updated it via fw paths
+            a_is_valid: bool = not newstate.busy_bit_table.is_busy[opa_physreg]
 
             # If a is valid, read it from the register file
             a_value: int = -1
             if a_is_valid:
-                # FIXME: old or new?
-                a_value = self.state.reg_file.regs[opa_physreg]
+                # `newstate` since updated via fw_paths
+                a_value = newstate.reg_file.regs[opa_physreg]
 
             b_value: int = -1
             if opb_str[0] == "x":
                 # A register
                 opb_reg = int(opb_str[1:])
+                # NOTE: `self.state` correct?
                 opb_physreg: int = self.state.reg_map_table.logical_to_physical[opb_reg]
-                b_is_valid: bool = not self.state.busy_bit_table.is_busy[opb_physreg]
+                # Using `newstate` since update via fw paths
+                b_is_valid: bool = not newstate.busy_bit_table.is_busy[opb_physreg]
                 if b_is_valid:
                     b_value = self.state.reg_file.regs[opb_physreg]
             else:
@@ -454,14 +548,13 @@ class CPU:
                 b_value = int(opb_str)
                 opb_physreg = -1
 
-            # FIXME: Also need to check the forwarding paths
-
             # > Allocate newly renamed entries in the Active List and the Integer Queue. Integer
             # > Queue entries are allocated after accessing the physical register file, which is
             # > similar to the Reservation Station used by the Tomasulo algorithm but differs
             # > from what is presented in the R10000 paper.
 
-            rob_entry = ActiveListEntry(False, False, destreg, olddest, dec_pc)
+            rob_entry = ActiveListEntry(False, False, destreg, olddest, dec_pc, phys_destreg_num)
+            print("active list put", rob_entry)
             newstate.active_list.put_entry(rob_entry)
 
             intque_entry = IntegerQueueEntry(
@@ -477,16 +570,11 @@ class CPU:
             )
             newstate.integer_queue.put_entry(intque_entry)
 
-            # > Observe the results of all functional units through the forwarding paths and
-            # > update the physical register file as well as the Busy Bit Table.
-
-            # FIXME: Do this.
-
         # Clear the DIR to indicate no backpreassure.
-        # NOTE: This means we must fetch (stage1) after this stage.
+        # This means we must fetch (stage1) after this stage.
         newstate.decoded_instr_reg.decoded_pcs.clear()
 
-    def stage3(self, newstate: CPUState) -> None:  # noqa: C901
+    def stage3_issue(self, newstate: CPUState) -> None:
         # 3.3 Issue Stage(, Execution Stage, and Forwarding Paths)
 
         # We can issue up to 4 ready instructions, ordered by PC
@@ -497,27 +585,19 @@ class CPU:
         for entry in newstate.integer_queue.queue:
             # Check ALU forwarding path for operand A if it is not ready
             if not entry.opa_is_ready:
-                for meow in newstate.alu.second_half:
-                    if entry.opa_reg_tag == meow.dest_register:
-                        alu_res: int | None  = newstate.alu.execute(meow)
-                        assert alu_res is not None, "exceptions not yet implemented"
-
-                        # We found the value of the operand in the ALU forwarding path
-                        entry.opa_is_ready = True
-                        entry.opa_value = alu_res
-                        break
+                forwarded_res: int | None = newstate.alu.fw_path(entry.opa_reg_tag)
+                if forwarded_res is not None:
+                    # We found the value of the operand in the ALU forwarding path
+                    entry.opa_is_ready = True
+                    entry.opa_value = forwarded_res
 
             # Check ALU forwarding path for operand B if it is not ready
             if not entry.opb_is_ready:
-                for meow in newstate.alu.second_half:
-                    if entry.opb_reg_tag == meow.dest_register:
-                        alu_res: int | None  = newstate.alu.execute(meow)
-                        assert alu_res is not None, "exceptions not yet implemented"
-
-                        # We found the value of the operand in the ALU forwarding path
-                        entry.opb_is_ready = True
-                        entry.opb_value = alu_res
-                        break
+                forwarded_res: int | None = newstate.alu.fw_path(entry.opb_reg_tag)
+                if forwarded_res is not None:
+                    # We found the value of the operand in the ALU forwarding path
+                    entry.opb_is_ready = True
+                    entry.opb_value = forwarded_res
 
             # If both operands are ready, we can issue
             if entry.opa_is_ready and entry.opb_is_ready:
@@ -530,19 +610,20 @@ class CPU:
         # Add to first stage of ALU
         for issuing in to_issue:
             newstate.alu.first_half.append(issuing)
-            # We only remove the entry from the Reservation Station after it reaches
-            # the second half of ALU.
 
-    def stage4(self, newstate: CPUState) -> None:
+        # We only remove the entry from the Reservation Station after it reaches
+        # the second half of ALU.
+
+    def stage4_alu(self, newstate: CPUState) -> None:
         # 3.3 (Issue Stage), Execution Stage, and Forwarding Paths
 
         # Clear out second-cycle ALU instructions
-        # TODO: We should have already used their results in all possible places.
+        # NOTE: We should have already used their results in all possible places.
 
         newstate.alu.clear_second()
 
         # Move first-cycle instructions to second cycle, making them available on forwarding paths.
-        newstate.alu.first_to_second()
+        newstate.alu.execute()
 
         # Now that they are in the second cycle, remove those instructions from the Integer Queue
         for instr in newstate.alu.first_half:
@@ -550,19 +631,14 @@ class CPU:
 
         newstate.alu.clear_first()
 
-    def stage5(self, newstate: CPUState) -> None:
+    def stage5_commit(self, newstate: CPUState) -> None:
         # 3.4 Commit Stage
 
-        # The ALU stuff is not clearly explained in the instructions, but lets use this moment
-        # to save the second-half ALU results into the register file.
-        # The forwarding path in the Figure is pretty clear about this I suppose.
-
-        for alu_entry in newstate.alu.second_half:
-            alu_res: int | None = newstate.alu.execute(alu_entry)
-            assert alu_res is not None, "exceptions not yet implemented"
-
-            newstate.reg_file.regs[alu_entry.dest_register] = alu_res
-            newstate.busy_bit_table.is_busy[alu_entry.dest_register] = False
+        # > (1) marking instructions done or exception on
+        # > receiving results from forwarding paths,
+        # We have already processed the ALU in stage4_alu(), mark the done instructions based on
+        # that.
+        newstate.active_list.update_all(newstate)
 
         # Graduate up to 4 instructions from the active list (ROB)
         to_commit: list[ActiveListEntry] = []
@@ -573,18 +649,7 @@ class CPU:
                 break
 
             if not entry.done:
-                # FIXME: exceptions
-                # > (1) marking instructions done or exception on
-                # > receiving results from forwarding paths,
-                # We lazily only update doneness here when we check for it.
-                # Are we actually not done?
-                physdest = newstate.reg_map_table.logical_to_physical[entry.logical_destination]
-                if not newstate.busy_bit_table.is_busy[physdest]:
-                    # We are actually done.
-                    entry.done = True
-                else:
-                    # have to wait until the next instruction is done
-                    break
+                break
 
             to_commit.append(entry)
             newstate.active_list.pop_entry()
@@ -593,15 +658,17 @@ class CPU:
                 # If we are going to commit an exception, stop here
                 break
 
+
+        # FIXME: handle exceptions!
         # FIXME: what?
         # > (2) retiring or rolling back instructions
 
         # > (3) recycling physical registers and push them back to the Free List.
         for commiting in to_commit:
-            physdest = newstate.reg_map_table.logical_to_physical[commiting.logical_destination]
-            assert not newstate.busy_bit_table.is_busy[physdest], "how are we busy?"
-
-            newstate.freelist.give_back_reg(physdest)
+            assert not newstate.busy_bit_table.is_busy[commiting.physical_destination], (
+                "how are we busy?"
+            )
+            newstate.freelist.give_back_reg(commiting.physical_destination)
 
     def stage6(self, newstate: CPUState) -> None:
         pass
@@ -613,19 +680,18 @@ class CPU:
         # self.state is oldstate, not modified during propagation
         newstate = copy.deepcopy(self.state)
 
-        # We do stage5 before ??? in order to free up the physical registers so they can
-        # be used.
-        self.stage5(newstate)
+        # We do stage4 before stage3 so the first-half ALU is clear before being appended to.
+        self.stage4_alu(newstate)
+        # We do stage5 after stage4 since we want to use the results of the ALU calculation.
+        # We do stage5 before stage2 because it can free up registers to be used in stage2.
+        self.stage5_commit(newstate)
 
-        # We do stage4 before stage3 so the first-half ALU is clear before being appended to
-        self.stage4(newstate)
-
-        self.stage3(newstate)
+        self.stage3_issue(newstate)
 
         # We do stage2 before stage1 so the DIR can be cleared or not.
-        self.stage2(newstate)
+        self.stage2_rename(newstate)
 
-        self.stage1(newstate)
+        self.stage1_fetch(newstate)
 
         # self.stage5(newstate)
         # self.stage6(newstate)
