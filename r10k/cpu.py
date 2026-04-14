@@ -838,8 +838,6 @@ class CPU:
             self.latch(newstate)
 
             self.dump_state_into_log()
-            # self.save_log()
-            # os.system("sleep 1")
 
         if self.state.exception:
             # One more final state where the flag is cleared
