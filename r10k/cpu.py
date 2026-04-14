@@ -1,7 +1,6 @@
 import copy
 from dataclasses import dataclass
 from pathlib import Path
-import os
 
 
 def str_bool(b: bool) -> str:
@@ -569,9 +568,6 @@ class CPU:
             opa_reg: int = int(operands[1].strip()[1:])
             opb_str: str = operands[2].strip()
 
-            # NOTE: Looking at the old state of the mapping table right after updating it?
-            # Is this correct?
-
             opa_physreg: int = newstate.reg_map_table.logical_to_physical[opa_reg]
             # Looking at `newstate` here cuz we just updated it via fw paths
             a_is_valid: bool = not newstate.busy_bit_table.is_busy[opa_physreg]
@@ -586,7 +582,6 @@ class CPU:
             if opb_str[0] == "x":
                 # A register
                 opb_reg = int(opb_str[1:])
-                # NOTE: `self.state` correct?
                 opb_physreg: int = newstate.reg_map_table.logical_to_physical[opb_reg]
                 # Using `newstate` since update via fw paths
                 b_is_valid: bool = not newstate.busy_bit_table.is_busy[opb_physreg]
@@ -700,7 +695,7 @@ class CPU:
             return
 
         # Clear out previous ALU instructions results
-        # NOTE: We should have already used their results in all possible places.
+        # We should have already used their results in all possible places.
 
         newstate.alu.clear_results()
 
