@@ -457,6 +457,7 @@ class CPU:
         self.state_log += str(self.state)
 
     def is_active_empty(self) -> bool:
+        # return True
         return self.state.active_list.size == 0
 
     def stage1_fetch(self, newstate: CPUState) -> None:
@@ -642,8 +643,11 @@ class CPU:
         for issuing in to_issue:
             newstate.alu.input.append(issuing)
 
-        # We only remove the entry from the Reservation Station after it reaches
-        # the second half of ALU.
+        # It's kinda weird that we are doing this now, but the tests want it so..
+        # Clear out the issued instructions
+        for issuing in to_issue:
+            newstate.integer_queue.queue.remove(issuing)
+
 
     def stage4_alu(self, newstate: CPUState) -> None:
         # 3.3 (Issue Stage), Execution Stage, and Forwarding Paths
@@ -699,12 +703,7 @@ class CPU:
 
         # > (3) recycling physical registers and push them back to the Free List.
         for commiting in to_commit:
-            # It's possible that we seem busy at this point because the busy bit table will
-            # only be updated in stage2().
-            # assert not newstate.busy_bit_table.is_busy[commiting.physical_destination], (
-            #     "how are we busy?"
-            # )
-            newstate.freelist.give_back_reg(commiting.physical_destination)
+            newstate.freelist.give_back_reg(commiting.old_destination)
 
     def stage6(self, newstate: CPUState) -> None:
         pass
