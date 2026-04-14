@@ -344,6 +344,7 @@ class ALUEntry:
 # 7. integer queue empy, alu empty, active list entry marked as done
 # 8. integer queue empy, alu empty, active list empty
 
+REG_VAL_MOD = 1 << 64
 
 class ALU:
     """Represents 4 ALUs which work in two cycles."""
@@ -401,11 +402,11 @@ class ALU:
 
         match entry.opcode:
             case "add":
-                return ALUEntry(entry.opa_value + entry.opb_value, False, entry)
+                return ALUEntry((entry.opa_value + entry.opb_value) % REG_VAL_MOD, False, entry)
             case "sub":
-                return ALUEntry(entry.opa_value - entry.opb_value, False, entry)
+                return ALUEntry((entry.opa_value - entry.opb_value) % REG_VAL_MOD, False, entry)
             case "mulu":
-                return ALUEntry(entry.opa_value * entry.opb_value, False, entry)
+                return ALUEntry((entry.opa_value * entry.opb_value) % REG_VAL_MOD, False, entry)
             case "divu":
                 if entry.opb_value == 0:
                     return ALUEntry(-1, True, entry)
