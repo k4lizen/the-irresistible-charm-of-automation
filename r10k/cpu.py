@@ -593,7 +593,7 @@ class CPU:
                 # Using `newstate` since update via fw paths
                 b_is_valid: bool = not newstate.busy_bit_table.is_busy[opb_physreg]
                 if b_is_valid:
-                    b_value = self.state.reg_file.regs[opb_physreg]
+                    b_value = newstate.reg_file.regs[opb_physreg]
             else:
                 # An immeditate
                 b_is_valid = True
