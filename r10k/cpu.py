@@ -743,7 +743,7 @@ class CPU:
         self.state = newstate
 
     def save_log(self) -> None:
-        self.state_log += "]"
+        self.state_log += "\n]"
         with self.out_file_path.open("w") as outfile:
             outfile.write(self.state_log)
 
