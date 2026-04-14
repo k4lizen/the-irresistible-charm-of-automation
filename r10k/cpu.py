@@ -227,21 +227,19 @@ class ActiveList:
         while True:
             entry = self.the_list[i]
 
-            if entry.done:
-                continue
+            if not entry.done:
+                # We don't need to check the busybit table, since the table is updated
+                # based on the ALU anyway.
 
-            # We don't need to check the busybit table, since the table is updated
-            # based on the ALU anyway.
-
-            fw_path_excepted: bool = newstate.alu.fw_path_exception(entry.physical_destination)
-            if fw_path_excepted:
-                entry.done = True
-                entry.exception = True
-            else:
-                fw_result: int | None = newstate.alu.fw_path(entry.physical_destination)
-                if fw_result is not None:
+                fw_path_excepted: bool = newstate.alu.fw_path_exception(entry.physical_destination)
+                if fw_path_excepted:
                     entry.done = True
-                    entry.exception = False
+                    entry.exception = True
+                else:
+                    fw_result: int | None = newstate.alu.fw_path(entry.physical_destination)
+                    if fw_result is not None:
+                        entry.done = True
+                        entry.exception = False
 
             i = (i + 1) % REORDER_BUFFER_SIZE
             if i == (self.tail + 1) % REORDER_BUFFER_SIZE:
@@ -258,7 +256,7 @@ class ActiveList:
                 res += str(self.the_list[i])
 
                 i = (i + 1) % REORDER_BUFFER_SIZE
-                if i == self.tail + 1:
+                if i == (self.tail + 1) % REORDER_BUFFER_SIZE:
                     break
 
         res += "\n    ],\n"
@@ -593,7 +591,7 @@ class CPU:
                 # Using `newstate` since update via fw paths
                 b_is_valid: bool = not newstate.busy_bit_table.is_busy[opb_physreg]
                 if b_is_valid:
-                    b_value = newstate.reg_file.regs[opb_physreg]
+                    b_value = self.state.reg_file.regs[opb_physreg]
             else:
                 # An immeditate
                 b_is_valid = True
@@ -613,7 +611,6 @@ class CPU:
             # > from what is presented in the R10000 paper.
 
             rob_entry = ActiveListEntry(False, False, destreg, olddest, dec_pc, phys_destreg_num)
-            # print("active list put", rob_entry)
             newstate.active_list.put_entry(rob_entry)
 
             intque_entry = IntegerQueueEntry(
